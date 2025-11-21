@@ -12,7 +12,7 @@ It ships with:
 ```
 .
 ├── aggregate_logs.py            # Provider auto-detection + normalization CLI
-├── baseline/                    # Reference runs used as similarity baselines
+├── baseline_samples/            # The samples of similarity baselines
 ├── detect_confused_deputy.py    # Confused Deputy detector
 ├── detect_agent_takeover.py     # Agent takeover scoring engine 
 ├── output/                      # Destination for normalized JSONL grouped per cloud
@@ -62,7 +62,7 @@ python3 detect_confused_deputy.py output/gcp
 Run the Agent Takeover detector on the normalized CloudEvents, comparing each file to the baseline corpus (example below uses AWS baselines):
 
 ```bash
-python3 detect_agent_takeover.py baseline output/aws --threshold 0.6
+python3 detect_agent_takeover.py baseline_samples output/aws --threshold 0.6
 ```
 
 ## Log Normalization Pipeline
@@ -154,7 +154,7 @@ Summary: processed 52 file(s), detected 3 potential vulnerability/vulnerabilitie
 `detect_agent_takeover.py` aligns each normalized CloudEvent stream with the closest baseline run, computes similarity scores, and highlights unexpected versus anomalous API calls. Tune the `--threshold` flag to control the alert sensitivity; the example below uses AWS data:
 
 ```bash
-python3 detect_agent_takeover.py baseline output/aws --threshold 0.6
+python3 detect_agent_takeover.py baseline_samples output/aws --threshold 0.6
 ```
 
 Sample output:
