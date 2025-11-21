@@ -42,7 +42,30 @@ SENSITIVE_SERVICE_KEYWORDS: Dict[str, Tuple[str, ...]] = {
     "bigtableadmin": ("bigtable",),
     # AI Platform model artifacts
     "aiplatform": ("aiplatform", "modelservice", "endpointservice"),
+    # Azure Logic Apps workflow execution & automation
+    "microsoft.logic": (
+        "workflows/write",
+        "runs/write",
+        "connections/write",
+        "actioncompleted",
+        "triggerfired",
+    ),
+    "actioncompleted": ("actioncompleted",),
 }
+
+AGENT_PRINCIPAL_TYPES = {
+    "service_account",
+    "managed_identity",
+    "serviceprincipal",
+    "application",
+    "assumed_role",
+}
+
+CHECK_AZURE_RESOURCE_SUBSTRINGS = (
+    "/actions/",
+    "/read/",
+    "/write/",
+)
 
 
 def _load_events(path: Path) -> List[Event]:
@@ -104,7 +127,27 @@ def _is_sensitive_agent_action(event: Event) -> bool:
         return False
 
     return any(keyword in operation for keyword in keywords)
+
+
+def _is_agent_principal(event: Event) -> bool:
+    principal_type = (event.principal_type or "").lower()
+    if principal_type in AGENT_PRINCIPAL_TYPES:
+        return True
+
+    principal_id = (event.principal_id or "").lower()
+    if principal_id.endswith(".iam.gserviceaccount.com"):
+        return True
+    if principal_id.startswith("arn:aws:sts::") and ":assumed-role/" in principal_id:
+        return True
+
     return False
+
+
+def _is_trackable_resource(resource_id: Optional[str]) -> bool:
+    if not resource_id:
+        return False
+    lowered = resource_id.lower()
+    return not any(token in lowered for token in CHECK_AZURE_RESOURCE_SUBSTRINGS)
 
 
 def detect_confused_deputy(events: Iterable[Event]) -> Optional[Tuple[Event, str]]:
@@ -131,16 +174,20 @@ def detect_confused_deputy(events: Iterable[Event]) -> Optional[Tuple[Event, str
         if event.principal_type == "user":
             if event.raw.get("status") == "success":
                 last_user_id = event.principal_id
-            if event.resource_id and event.raw.get("status") == "success":
+            if (
+                event.resource_id
+                and event.raw.get("status") == "success"
+                and _is_trackable_resource(event.resource_id)
+            ):
                 seen_resources[event.resource_id] = event.principal_id
             continue
 
         if (
-            event.principal_type == "service_account"
+            _is_agent_principal(event)
             and event.resource_id
+            and _is_trackable_resource(event.resource_id)
             and event.raw.get("status") == "success"
             and _is_sensitive_agent_action(event)
-            and event.principal_id.endswith(".iam.gserviceaccount.com")
         ):
             if event.resource_id not in seen_resources:
                 caller = last_user_id
