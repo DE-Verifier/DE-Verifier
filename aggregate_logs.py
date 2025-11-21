@@ -28,7 +28,7 @@ class EnhancedJSONEncoder(json.JSONEncoder):
         return super().default(obj)
 
 
-def _extract_first_event(data: Any) -> Optional[Dict[str, Any]]:
+def _extract_first_event(data: Any, file_path: Optional[Path] = None) -> Optional[Dict[str, Any]]:
     """
     Attempts to extract the first event dict from assorted JSON structures.
     Supports:
@@ -53,15 +53,6 @@ def _extract_first_event(data: Any) -> Optional[Dict[str, Any]]:
         # Fallback: assume dict itself is the event
         return data
 
-    # Path-based heuristic as a last resort (useful for curated datasets)
-    path_parts = {part.lower() for part in file_path.parts}
-    if 'gcp' in path_parts:
-        return 'gcp'
-    if 'aws' in path_parts:
-        return 'aws'
-    if 'azure' in path_parts:
-        return 'azure'
-
     return None
 
 
@@ -74,7 +65,7 @@ def _load_sample_event(file_path: Path) -> Optional[Dict[str, Any]]:
         with open(file_path, 'rt', encoding='utf-8-sig') as f:
             try:
                 data = json.load(f)
-                return _extract_first_event(data)
+                return _extract_first_event(data, file_path)
             except json.JSONDecodeError:
                 f.seek(0)
                 for line in f:
@@ -88,7 +79,7 @@ def _load_sample_event(file_path: Path) -> Optional[Dict[str, Any]]:
                     if isinstance(maybe, dict):
                         return maybe
                     if isinstance(maybe, list):
-                        event = _extract_first_event(maybe)
+                        event = _extract_first_event(maybe, file_path)
                         if event:
                             return event
                 return None
@@ -97,13 +88,56 @@ def _load_sample_event(file_path: Path) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _infer_provider_from_path(file_path: Path) -> Optional[str]:
+    """
+    Guess provider names purely from the path in cases where structured hints are absent.
+    """
+    lowered_path = file_path.as_posix().lower()
+    if any(token in lowered_path for token in ('cloudtrail', 'aws', 'iam.amazonaws.com')):
+        return 'aws'
+    if any(token in lowered_path for token in ('gcp', 'google', 'cloudaudit', 'bigquery')):
+        return 'gcp'
+    if any(token in lowered_path for token in ('azure', 'logs_', 'agent diagnostic logs', 'pipelines', 'worker_')):
+        return 'azure'
+    return None
+
+
+def _looks_like_azure_worker_log(file_path: Path) -> bool:
+    """
+    Heuristic detection for Azure Pipelines worker logs (plain-text, not JSON).
+    """
+    keywords = (
+        'worker process entry point',
+        'jobrunner service created',
+        '##[section]starting',
+        '##[command]',
+    )
+    try:
+        with open(file_path, 'rt', encoding='utf-8', errors='ignore') as handle:
+            for _ in range(100):
+                line = handle.readline()
+                if not line:
+                    break
+                lowered = line.lower()
+                if any(keyword in lowered for keyword in keywords):
+                    return True
+                if lowered.strip().startswith('{'):
+                    # looks like structured JSON instead
+                    return False
+    except OSError:
+        return False
+    return False
+
+
 def _detect_provider(file_path: Path) -> Optional[str]:
     """
     Inspects the first event in the file to guess the cloud provider.
     """
     sample_event = _load_sample_event(file_path)
     if not sample_event:
-        return None
+        if _looks_like_azure_worker_log(file_path):
+            return 'azure'
+        return _infer_provider_from_path(file_path)
 
     # AWS CloudTrail indicators
     if sample_event.get('eventSource') or sample_event.get('userIdentity'):
@@ -139,7 +173,7 @@ def _detect_provider(file_path: Path) -> Optional[str]:
     if any(field in sample_event for field in azure_fields):
         return 'azure'
 
-    return None
+    return _infer_provider_from_path(file_path)
 
 
 def _build_output_path(input_file: Path, provider: str, output_arg: Optional[Path], force_directory: bool) -> Path:
@@ -216,7 +250,7 @@ def _process_file(input_file: Path, output_arg: Optional[Path], force_output_dir
     try:
         with open(output_path, 'w', encoding='utf-8') as f:
             for event in all_events:
-                event_dict = event.dict()
+                event_dict = event.model_dump()
                 event_dict.pop('raw_log', None)
                 json.dump(event_dict, f, cls=EnhancedJSONEncoder)
                 f.write('\n')
@@ -232,8 +266,19 @@ def _process_file(input_file: Path, output_arg: Optional[Path], force_output_dir
 
 
 def _collect_input_files(root: Path, pattern: str, recursive: bool) -> List[Path]:
-    iterator = root.rglob(pattern) if recursive else root.glob(pattern)
-    files = [path for path in iterator if path.is_file()]
+    """
+    Supports comma-separated glob patterns so users can mix JSON and text logs.
+    """
+    patterns = [p.strip() for p in pattern.split(',') if p.strip()]
+    if not patterns:
+        patterns = ['*.json', '*.jsonl', '*.txt', '*.log']
+
+    files = set()
+    for single_pattern in patterns:
+        iterator = root.rglob(single_pattern) if recursive else root.glob(single_pattern)
+        for path in iterator:
+            if path.is_file():
+                files.add(path)
     return sorted(files)
 
 
@@ -257,8 +302,8 @@ def main():
     )
     parser.add_argument(
         "--pattern",
-        default="*.json",
-        help="Glob pattern to match files when --input points to a directory. Defaults to '*.json'."
+        default="*.json,*.jsonl,*.txt,*.log",
+        help="Comma-separated glob patterns to match files when --input is a directory."
     )
     parser.add_argument(
         "--recursive",

@@ -160,6 +160,7 @@ def _parse_timestamp(value: str) -> datetime:
 
 
 SENSITIVE_KEYWORDS = (
+    # Aws Specific
     "Delete",
     "Detach",
     "Stop",
@@ -178,6 +179,15 @@ SENSITIVE_KEYWORDS = (
     "ListBuckets",
     "Decrypt",
     "GetSecretValue",
+    # Azure Specific
+    "AzurePipelines:Job.Log",
+    "secrets/get/action",
+    "workflows/write",
+    "listKeys/action",
+    "roleAssignments/write",
+    "runCommand/action",
+    "networkSecurityGroups/write",
+    "regenerateKey/action",
 )
 
 
@@ -339,6 +349,13 @@ def main() -> None:
     if not baseline_files:
         raise SystemExit("No JSONL files found under the baseline directory.")
 
+    job_start_baseline = next(
+        (path for path in baseline_files if "job.start" in path.name.lower()), None
+    )
+    logicapp_baseline = next(
+        (path for path in baseline_files if "logicapp" in path.name.lower()), None
+    )
+
     combo_total = 0
 
     for observed_path in sorted(observed_dir.glob("*.jsonl")):
@@ -349,11 +366,17 @@ def main() -> None:
         if not operation_fragment:
             continue
 
-        candidates = [
-            base_path
-            for base_path in baseline_files
-            if operation_fragment in base_path.name.lower()
-        ]
+        candidates: List[Path] = []
+        if "job.start" in operation_fragment and job_start_baseline:
+            candidates = [job_start_baseline]
+        elif logicapp_baseline:
+            candidates = [logicapp_baseline]
+        if not candidates:
+            candidates = [
+                base_path
+                for base_path in baseline_files
+                if operation_fragment in base_path.name.lower()
+            ]
         if not candidates:
             # print(
             #     f"[SKIP] {observed_path.name}: no baseline filename contains '{operation_fragment}'"
